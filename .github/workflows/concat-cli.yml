@@ -1,0 +1,74 @@
+name: Build concat-cli for Android
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  GGML_NATIVE: "OFF"
+
+jobs:
+  cli:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read the version
+        id: version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' src/Cargo.toml | head -1)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: The pinned toolchain
+        id: toolchain
+        run: echo "channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' src/rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+          targets: aarch64-linux-android
+      - name: System libraries
+        run: sudo apt-get update && sudo apt-get install -y cmake libclang-dev
+      - name: FFmpeg for Android (cached)
+        id: ffmpeg
+        uses: actions/cache/restore@v4
+        with:
+          path: src/vendor/ffmpeg/aarch64-linux-android
+          key: ffmpeg-aarch64-linux-android-${{ hashFiles('src/scripts/ffmpeg-mobile.sh') }}
+      - name: FFmpeg for Android
+        if: steps.ffmpeg.outputs.cache-hit != 'true'
+        run: src/scripts/ffmpeg-mobile.sh aarch64-linux-android
+      - name: FFmpeg for Android (save)
+        if: steps.ffmpeg.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: src/vendor/ffmpeg/aarch64-linux-android
+          key: ${{ steps.ffmpeg.outputs.cache-primary-key }}
+      - name: sherpa-onnx for Android
+        run: src/scripts/sherpa-mobile.sh aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src
+          key: aarch64-linux-android
+      - name: Build concat-cli and concat-server
+        working-directory: src
+        run: |
+          set -o pipefail
+          eval "$(scripts/mobile-env.sh aarch64-linux-android)"
+          cargo build --release -p concat-cli -p concat-server --target aarch64-linux-android 2>&1 | tee build.log
+      - name: Build log on failure
+        if: failure()
+        run: |
+          if [ -f src/build.log ]; then tail -n 150 src/build.log; fi
+      - name: Stage
+        run: |
+          set -euo pipefail
+          mkdir stage
+          cp src/target/aarch64-linux-android/release/concat-cli stage/
+          cp src/target/aarch64-linux-android/release/concat-server stage/
+          ls -l stage
+      - uses: actions/upload-artifact@v4
+        with:
+          name: concat-cli-aarch64-linux-android
+          path: stage/*
+          if-no-files-found: error
